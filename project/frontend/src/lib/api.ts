@@ -23,10 +23,10 @@ export async function fetchPlan(scenario: Scenario): Promise<SolveResponse> {
   return res.json()
 }
 
-export async function runPlan(): Promise<void> {
+export async function runPlan(): Promise<boolean> {
   const store = useSimStore.getState()
   const { scenario, runtime, plan } = store
-  if (!scenario || !runtime || plan.length === 0) return
+  if (!scenario || !runtime || plan.length === 0) return false
 
   store.setRunning(true)
   store.appendLog({ text: `[---] Executing plan (${plan.length} steps)...`, level: 'info' })
@@ -43,7 +43,7 @@ export async function runPlan(): Promise<void> {
       store.appendLog({ text: `[${idx}] ERROR: ${result.message}`, level: 'error' })
       store.setError(result.message)
       store.setRunning(false)
-      return
+      return false
     }
 
     if (result.pathCells && result.pathCells.length > 1) {
@@ -63,7 +63,9 @@ export async function runPlan(): Promise<void> {
     await sleep(ACTION_PAUSE_MS / Math.max(0.25, useSimStore.getState().speed))
   }
 
-  if (checkGoal(scenario, current)) {
+  const missionComplete = checkGoal(scenario, current)
+
+  if (missionComplete) {
     store.appendLog({
       text: `[***] MISSION COMPLETE — all stations ONLINE (spent ${current.energySpent})`,
       level: 'ok',
@@ -76,6 +78,7 @@ export async function runPlan(): Promise<void> {
   }
   store.setRunning(false)
   store.setAnim([], null)
+  return missionComplete
 }
 
 function normalizeAngle(a: number): number {

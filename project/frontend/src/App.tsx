@@ -6,6 +6,7 @@ import { useSimStore } from './store/simStore'
 import { World } from './scene/World'
 import { BottomControls, LeftPanel, RightPanel } from './ui/HUD'
 import { fetchPlan, runPlan } from './lib/api'
+import { fireConfetti } from './lib/confetti'
 import './App.css'
 
 const scenario = scenarioData as Scenario
@@ -41,7 +42,11 @@ export default function App() {
       })
       // small delay so reset state settles, then run
       await new Promise((r) => setTimeout(r, 200))
-      await runPlan()
+      const missionComplete = await runPlan()
+      if (missionComplete) {
+        fireConfetti()
+        window.alert('🎉 ¡Misión completada! Todas las estaciones están ONLINE.')
+      }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
       setError(msg)
