@@ -1,4 +1,4 @@
-"""Mini world simulator — validates demo plan legality against scenario.json."""
+"""Physical world simulator/validator for plans produced by the search agent."""
 
 from __future__ import annotations
 
@@ -34,7 +34,7 @@ def initial_state(scenario: dict[str, Any]) -> dict[str, Any]:
 
 
 def payload_weight(payload: list[dict[str, Any]]) -> int:
-    return sum(p.get("weight", 1) for p in payload)
+    return sum(int(p.get("weight", 1)) for p in payload)
 
 
 def spend(state: dict[str, Any], cost: int, battery_max: int) -> None:
@@ -73,10 +73,10 @@ def apply_step(scenario: dict[str, Any], state: dict[str, Any], step: dict[str, 
 
     if op == "PICKUP":
         item = step["item"]
-        assert payload_weight(state["payload"]) + 1 <= cap, "cargo full"
         if item in state["ground_keys"]:
             assert state["ground_keys"][item] == state["zone"]
             key = next(k for k in scenario["keys"] if k["id"] == item)
+            assert payload_weight(state["payload"]) + int(key.get("weight", 1)) <= cap, "cargo full"
             spend(state, cost, bat_max)
             del state["ground_keys"][item]
             state["payload"].append(
@@ -86,6 +86,7 @@ def apply_step(scenario: dict[str, Any], state: dict[str, Any], step: dict[str, 
         if item in state["ground_tools"]:
             assert state["ground_tools"][item] == state["zone"]
             tool = next(t for t in scenario["tools"] if t["id"] == item)
+            assert payload_weight(state["payload"]) + int(tool.get("weight", 1)) <= cap, "cargo full"
             spend(state, cost, bat_max)
             del state["ground_tools"][item]
             state["payload"].append(
@@ -104,7 +105,13 @@ def apply_step(scenario: dict[str, Any], state: dict[str, Any], step: dict[str, 
             mat["count"] -= 1
             if mat["count"] <= 0:
                 del state["ground_materials"][item]
-            state["payload"].append({"kind": "material", "type": item, "weight": 1})
+            material = next(m for m in scenario["materials"] if m["type"] == item)
+            assert payload_weight(state["payload"]) + int(material.get("weight", 1)) <= cap, "cargo full"
+            state["payload"].append({
+                "kind": "material",
+                "type": item,
+                "weight": int(material.get("weight", 1)),
+            })
             return
         raise AssertionError(f"Item {item} not on ground in {state['zone']}")
 

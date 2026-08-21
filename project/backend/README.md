@@ -1,35 +1,52 @@
 # Backend — Emergency Control
 
-Python API that exposes `POST /api/solve`.
+Python/FastAPI backend for the Emergency Control agent.
 
-The default implementation returns a **demo plan** (no search / no AI) so the
-frontend can be tested end-to-end. Students replace the solve handler with
-their search agent. Do not «fix» `scenario.json` (capacity, battery, rooms)
-to make UCS finish: formulate `Applicable` instead. See `project/design.md`.
+The solver is now a **Uniform-Cost Graph Search (UCS)** agent. The search state
+is separated from node/history metadata and is canonicalized for graph search.
+Battery dominance is handled with a Pareto-style check over the same physical
+world: a state is dominated when another route reaches that world with
+`g <= g_other` and residual battery `>= battery_other`. Successor generation
+restricts `DROP` to capacity-releasing cases described in `design.md`.
+
+## Structure
+
+- `src/main.py` — FastAPI entry point.
+- `src/agent.py` — public solver facade.
+- `src/state.py` — immutable canonical physical state.
+- `src/node.py` — search node (`g`, parent, action, depth).
+- `src/actions.py` — `Applicable` and deterministic `Result`.
+- `src/search.py` — UCS Graph Search and battery dominance.
+- `src/simulator.py` — physical plan validator.
+- `tests/` — search and integration tests.
 
 ## Run
 
 ```bash
-cd project/backend
-python -m venv .venv
-# Windows:
-.venv\Scripts\activate
-# macOS/Linux:
-# source .venv/bin/activate
+cd backend
 pip install -r requirements.txt
-uvicorn src.main:app --reload --app-dir src --port 8000
+uvicorn src.main:app --reload --port 8000
 ```
 
-Or from `backend/src`:
+## API
 
-```bash
-cd project/backend/src
-uvicorn main:app --reload --port 8000
+`POST /api/solve` accepts a scenario JSON and returns the existing frontend
+contract:
+
+```json
+{
+  "solution_found": true,
+  "total_cost": 42,
+  "steps": [],
+  "message": "UCS solution found."
+}
 ```
 
 ## Tests
 
 ```bash
-cd project/backend
-python tests/test_demo_plan.py
+cd backend
+python -m pytest tests
 ```
+
+The solver does not modify `scenario.json` to make the search easier.

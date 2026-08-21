@@ -175,16 +175,37 @@ precondiciones, efectos, costo. Toda acción del mundo exige además
 | Acción | Precondiciones | Efectos | Costo |
 |---|---|---|---|
 | **MOVER(Origen, Destino)** | El robot está en Origen. Existe un corredor directo entre Origen y Destino. Si el corredor tiene una puerta, esta debe estar desbloqueada. La batería alcanza para cubrir el consumo del corredor. | La posición del robot cambia a Destino. La batería disminuye según el costo del corredor. | El costo de energía del corredor recorrido. |
-| **RECARGAR()** | El robot está en una zona con estación de recarga. La batería actual es menor a la máxima. | La batería del robot se restaura por completo. | Un costo mínimo positivo (para evitar bucles). |
-| **PICKUP(Objeto)** | El objeto está físicamente en el suelo de la zona actual. El peso del objeto no excede la capacidad de carga restante del robot. El objeto no es un "objeto muerto" y es necesario para una meta futura pendiente. | El inventario del robot aumenta en ese objeto. La cantidad del objeto en el suelo disminuye. | Costo unitario de manipulación. |
-| **DROP(Objeto)** | El robot lleva el objeto en su inventario. Solo se genera si el robot necesita liberar peso para recoger un objeto crítico en la zona actual. | El inventario del robot disminuye en ese objeto. El objeto se añade al suelo de la zona. | Costo unitario de manipulación. |
+| **RECARGAR()** | El robot está en una zona con cargador/estación de recarga. La batería actual es menor a la máxima y alcanza para pagar el costo oficial de recarga. | El costo de recarga se descuenta primero y la batería se restaura a su capacidad máxima. | `action_costs.recharge` del escenario. |
+| **PICKUP(Objeto)** | El objeto está físicamente en el suelo de la zona actual, es relevante para alguna tarea pendiente y su peso cabe en la capacidad restante. | El inventario aumenta en ese objeto y la cantidad equivalente en el suelo disminuye. | `action_costs.pickup` del escenario. |
+| **DROP(Objeto)** | El robot lleva el objeto. Solo se genera si existe un objeto relevante en el suelo de la zona actual que no cabe con la carga actual, pero sí cabe después de soltar ese objeto. | El inventario disminuye y el objeto queda en el suelo de la zona actual. | `action_costs.drop` del escenario. |
 | **OPERAR(Equipo, Operación)** | El robot está en la zona del equipo. Se cumplen las dependencias lógicas del entorno (por ejemplo, el sistema está desconectado). El robot posee en su inventario las herramientas y materiales necesarios. | Se descuentan del inventario los materiales consumibles utilizados. Las herramientas reutilizables se conservan. El estado lógico del equipo se actualiza de forma permanente. | Costo operativo específico de la tarea (no negativo). |
+
+### Traducción entre acciones internas y el contrato visual
+
+Las acciones anteriores son el modelo interno del agente. No se envían al
+frontend con esos nombres. Antes de retornar la solución, cada acción se
+traduce al conjunto cerrado de operaciones del contrato:
+
+| Acción interna | Operación retornada |
+|---|---|
+| `MOVER(origen,destino)` | `MOVE` |
+| `PICKUP(objeto)` | `PICKUP` |
+| `DROP(objeto)` | `DROP` |
+| `ABRIR_PUERTA(puerta)` | `INTERACT` con `action: OPEN_DOOR` |
+| `REPARAR(panel,material)` | `INTERACT` con `action: REPAIR` y `consumes` |
+| `ACTIVAR(estación)` | `INTERACT` con `action: ACTIVATE` |
+| `RECARGAR(cargador)` | `INTERACT` con `action: RECHARGE` |
+
+Por tanto, `OPEN_DOOR`, `REPAIR`, `ACTIVATE` y `RECHARGE` son nombres de la
+acción interna o del subcampo `action` de `INTERACT`; nunca se retornan como
+valores de `op`. El backend retorna únicamente `MOVE`, `PICKUP`, `DROP` o
+`INTERACT`, con los costos oficiales tomados de `scenario.json`.
 
 ### Decisiones de formulación para evitar la explosión de estados
 
 En línea con el principio de mínimo compromiso, la generación de sucesores de las acciones PICKUP y DROP se restringió con criterios lógicos racionales:
 
-**1. Control de la generación de DROP.** El simulador permite físicamente soltar un objeto en cualquier zona. Sin embargo, si el agente generara la acción DROP en cada estado posible, el número de acciones posibles por estado crecería de forma exponencial, forzando al algoritmo de búsqueda a simular infinitas trayectorias donde el robot traslada materiales sin propósito. Un plan óptimo nunca ejecuta un DROP en un corredor vacío a menos que sea estrictamente necesario para liberar capacidad de carga para un objeto más prioritario. Por eso, el agente solo genera DROP si el estado actual exige liberar peso para poder realizar un PICKUP crítico. Esto elimina millones de ramas muertas sin perder jamás la solución de menor costo.
+**1. Control de la generación de DROP.** El simulador permite físicamente soltar un objeto en cualquier zona. La búsqueda, sin embargo, no genera todos esos sucesores. `DROP` solo se genera cuando existe en la zona actual un objeto relevante para una tarea pendiente que no cabe con la carga actual, pero sí cabe después de soltar uno de los objetos transportados. De esta forma, la acción representa una decisión real de liberar capacidad y no una reubicación arbitraria de objetos.
 
 **2. Eliminación de acciones sobre "objetos muertos".** Una vez que una variable del entorno cambia permanentemente (por ejemplo, un reactor queda activo o una puerta queda abierta), las herramientas específicas que se requirieron para esa única tarea pierden toda utilidad. El robot no genera acciones de recoger herramientas cuyas tareas asociadas ya fueron completadas con éxito. Considerar estas acciones equivaldría a expandir permutaciones de "estados muertos" en la búsqueda, aumentando inútilmente el consumo de memoria.
 
@@ -207,38 +228,39 @@ mínimo usa una acción que usted dejó de generar.
 
 **Cuándo genera DROP el agente**
 
-El generador de sucesores del agente genera la acción DROP únicamente cuando se cumplen a la vez estas condiciones:
-1. **Saturación de carga:** el robot está en una zona donde hay un objeto en el suelo que es necesario para una tarea futura.
-2. **Capacidad insuficiente:** el robot no tiene suficiente capacidad libre para recoger ese objeto.
-3. **Liberación óptima:** el robot suelta un elemento que no se requiere de forma inmediata en los pasos siguientes, para liberar el peso exacto que le permita recoger el objeto prioritario.
+El generador de sucesores genera `DROP` únicamente cuando se cumplen estas
+condiciones:
 
-En cualquier otro caso, la acción DROP no se genera, obligando al robot a llevar los objetos consigo de manera persistente.
+1. **Existe una necesidad local:** hay en la zona actual un objeto relevante
+   para una tarea pendiente.
+2. **No cabe actualmente:** el peso de ese objeto, sumado al peso de la carga,
+   supera la capacidad del robot.
+3. **Existe una liberación suficiente:** al soltar uno de los objetos que el
+   robot lleva, el objeto relevante pasa a caber.
+
+El generador no crea `DROP` para cambiar arbitrariamente la ubicación de un
+objeto, ni para recorrer las cinco zonas posibles como parte de una
+permutación. Un objeto muerto que permanece en el inventario también puede
+ser candidato a `DROP`, porque ya no aporta utilidad futura pero su peso sigue
+siendo físicamente relevante para la capacidad.
 
 **Por qué no se pierde el óptimo**
 
-- Llevar objetos no consume energía extra: el costo de moverse depende solo del corredor, no de si el robot viaja cargado o vacío.
-- Evitar costos de manipulación redundantes: soltar y volver a recoger un objeto que no estorbaba habría sumado dos costos de manipulación innecesarios; un plan óptimo siempre preferirá mantenerlo guardado durante el trayecto.
-- Abandonar un objeto sin necesidad suma un costo innecesario al plan, y la meta no premia dejar objetos tirados.
-- Las operaciones de mantenimiento se realizan directamente desde el inventario: el robot no necesita soltar las herramientas en el suelo para poder usarlas.
+Transportar un objeto no aumenta el costo de `MOVE`: el costo depende
+únicamente del corredor. En cambio, `PICKUP` y `DROP` tienen costos positivos
+definidos por el escenario. Por eso, si una carga puede mantenerse sin impedir
+ninguna operación futura, soltarla y volverla a recoger solo agrega costo.
 
-**Conclusión:** La generación de DROP se restringe a situaciones en las que existe una
-necesidad real de liberar capacidad para recoger un objeto que puede ser
-relevante para una tarea pendiente.
+Cuando un objeto relevante no cabe, cualquier plan que necesite recogerlo debe
+liberar suficiente capacidad en algún momento. Si el objeto que se debe soltar
+se encuentra actualmente en la carga y el objeto relevante está en la zona
+actual, hacer ese `DROP` antes del `PICKUP` es una forma suficiente de realizar
+la liberación necesaria. El generador considera únicamente esos `DROP` que
+pueden producir inmediatamente esa liberación de capacidad.
 
-La razón de esta restricción es que transportar un objeto no aumenta el costo
-de movimiento, mientras que PICKUP y DROP sí tienen costo positivo. Por tanto,
-si un objeto puede permanecer en el inventario sin impedir ninguna acción
-necesaria, moverlo al suelo y recogerlo posteriormente solo añade costo y no
-mejora el estado del mundo.
-
-Por ello, el generador no considera DROP como una acción de transporte o
-reorganización arbitraria del inventario. Solo la genera cuando liberar
-capacidad puede ser necesario para continuar con un plan válido y de costo
-mínimo.
-
-Esta es una restricción del conjunto de sucesores de la búsqueda, no una
-modificación de las reglas físicas del simulador: el contrato sigue
-permitiendo DROP cuando el objeto está en el payload.
+La restricción es sobre `Applicable`, no sobre la física del mundo: el contrato
+sigue aceptando un `DROP` siempre que el objeto esté en el payload. El backend
+simplemente evita generar sucesores que no pueden contribuir a un plan óptimo.
 
 ## Modelo de transición
 
@@ -365,10 +387,7 @@ dominadas y `parent` permite reconstruir la secuencia final de acciones.
 
 ### Discusión de propiedades
 
-**Completitud.** La búsqueda de costo uniforme tiene garantía de completitud en este entorno bajo tres condiciones que se cumplen en este diseño:
-1. El número de acciones posibles por estado es finito (derivado de un conjunto acotado de acciones aplicables).
-2. Todos los costos de las acciones son positivos y mayores a un valor mínimo fijo (esto evita que el algoritmo quede atrapado en un ciclo de costo acumulado cero).
-3. El espacio de estados es finito: si no existe un camino viable hacia la meta (por ejemplo, si el robot se queda sin batería en una zona sin estación de recarga), el algoritmo vaciará la frontera de búsqueda y reportará con certeza que no hay solución, en lugar de entrar en un bucle infinito.
+**Completitud.** La búsqueda de costo uniforme es completa en esta formulación porque el espacio de estados relevante es finito, el número de sucesores por estado es finito y la búsqueda de grafos registra las configuraciones ya dominadas o exploradas. En los escenarios del contrato los costos de las acciones son no negativos y la generación de sucesores evita ciclos de manipulación inútiles. Si existe una solución alcanzable, la frontera conserva los candidatos necesarios hasta que uno de ellos sea extraído como meta; si no existe, la frontera termina vaciándose y el agente retorna `FAILURE`.
 
 **Optimalidad (¿la prueba de meta se hace al extraer o al generar?).** La búsqueda de costo uniforme es óptima porque la prueba de meta se realiza únicamente al extraer un nodo de la frontera de búsqueda, no al generarlo. Si se evaluara la meta en el momento de generar un nodo hijo, el algoritmo podría devolver un camino más corto en pasos pero más costoso en energía.
 
@@ -378,7 +397,7 @@ Por ejemplo: si el robot puede llegar a la meta por un corredor directo caro en 
 
 **Tiempo y espacio.** La complejidad en el peor caso depende del número de acciones posibles por estado y de la relación entre el costo del plan óptimo y el costo mínimo de una acción individual: mientras más "ramificado" sea el problema y más barata sea la acción mínima, más nodos hay que explorar.
 
-Muchos suponen erróneamente que esa ramificación está limitada por el grado de conectividad del mapa (por ejemplo, que una zona solo se conecta a otras dos o tres). Esto es falso: la verdadera ramificación peligrosa está determinada por la cantidad de acciones lógicas que el agente genera como sucesores en cada estado. Si el generador de sucesores permite recoger o soltar cualquier objeto en cualquier zona sin un propósito inmediato, esa ramificación se multiplica exponencialmente por la combinatoria de ubicaciones de objetos. Al restringir la generación de DROP solo a los casos de saturación de carga, se reduce drásticamente la ramificación efectiva de la búsqueda, permitiendo que la memoria y el tiempo de cómputo se mantengan en niveles mínimos.
+Muchos suponen erróneamente que esa ramificación está limitada por el grado de conectividad del mapa (por ejemplo, que una zona solo se conecta a otras dos o tres). Esto es falso: la verdadera ramificación peligrosa está determinada por la cantidad de acciones lógicas que el agente genera como sucesores en cada estado. Si el generador de sucesores permite recoger o soltar cualquier objeto en cualquier zona sin un propósito inmediato, esa ramificación se multiplica exponencialmente por la combinatoria de ubicaciones de objetos. Al restringir la generación de DROP solo a los casos en que una carga actual impide recoger un objeto relevante y soltar uno de los objetos transportados resolvería esa falta de capacidad, se reduce drásticamente la ramificación efectiva de la búsqueda, permitiendo que la memoria y el tiempo de cómputo se mantengan en niveles mínimos.
 
 **Cuándo se rompen las garantías del algoritmo:**
 - **Costos cero o negativos:** si recoger o soltar un objeto tuviera costo cero, el robot podría entrar en un bucle infinito de manipulación repetitiva sin incrementar el costo del camino. Si los costos fueran negativos, se rompería la suposición de que el costo de camino crece de forma constante, impidiendo que el primer nodo meta extraído sea el óptimo.
@@ -437,20 +456,41 @@ cómo la lista de explorados aprovecha (o no) esta dominancia.
 
 **Cómo la lista de explorados aprovecha esta dominancia**
 
-Para aprovechar esta dominancia, la lista de explorados no debe comparar los estados completos de forma exacta ("todo o nada"). En su lugar, debe registrar por separado la configuración del mundo y el nivel de batería con el que fue visitada.
+La batería forma parte del estado porque cambia qué acciones son aplicables.
+Sin embargo, para una misma configuración física del mundo puede existir más
+de un nivel de batería alcanzado por rutas diferentes. La poda se basa en
+dominancia, no simplemente en igualdad exacta.
 
-Se puede pensar el estado completo como formado por dos partes: la configuración del mundo (posición del robot, inventario, objetos en el suelo y estado lógico del entorno) por un lado, y el nivel de batería por otro. La lista de explorados se organiza entonces como una tabla que asocia cada configuración del mundo con el máximo nivel de batería residual con el que se ha expandido esa configuración hasta el momento.
+Sea `W` la configuración física formada por posición, inventario,
+distribución relevante de objetos y estado lógico del entorno. Para dos nodos
+con la misma `W`, un nodo `n1` domina a otro `n2` cuando:
 
-Gracias a que la búsqueda de costo uniforme extrae los nodos de la frontera en orden creciente de costo acumulado, cualquier nodo con la misma configuración del mundo que se extraiga más tarde tendrá, por definición, un costo acumulado mayor o igual al anterior. Por eso, cuando el algoritmo extrae un nodo, evalúa lo siguiente antes de expandirlo:
+\[
+n_1 \succ n_2
+\iff
+g(n_1)\le g(n_2)
+\land
+B(n_1)\ge B(n_2)
+\]
 
-- **Si la configuración del mundo no está registrada:** es la primera vez que se alcanza esa configuración física. Se registra junto con su batería actual y se procede a expandirla.
-- **Si la configuración del mundo ya está registrada, con cierto nivel máximo de batería:**
-  - Si la batería del nodo actual es menor o igual a la registrada, el nodo está completamente dominado (ofrece igual o menor energía a un costo igual o mayor), así que se descarta y se poda de inmediato, sin expandir sus sucesores.
-  - Si la batería del nodo actual es mayor a la registrada, aunque el costo acumulado sea mayor, el nodo trae más energía residual que podría ser la única capaz de permitir acciones costosas más adelante en el mapa. En ese caso, se actualiza el registro con la nueva batería y se procede a expandirlo.
+y al menos una desigualdad es estricta.
 
-**Impacto en el espacio de estados**
+En ese caso, cualquier continuación legal disponible desde `n2` también es
+posible desde `n1`: ambos tienen la misma configuración física, mientras que
+`n1` dispone de igual o mayor batería y ha pagado igual o menor costo. Por lo
+tanto, `n2` no puede producir una solución de menor costo y puede descartarse.
 
-Este diseño elimina de raíz la multiplicación de caminos redundantes y desvíos inútiles. El robot ya no gasta memoria simulando trayectorias donde deambula sin sentido gastando energía, porque cualquier intento de revisitar una configuración con menor batería y peor costo es interceptado y descartado de forma casi instantánea por el chequeo de dominancia.
+La implementación mantiene `CLOSED[W]` con la mayor batería residual observada
+para una configuración ya expandida. Como UCS extrae en orden no decreciente de
+`g(n)`, una nueva configuración con menor o igual batería y mayor o igual costo
+está dominada por la que ya fue expandida. Si aparece una configuración con
+mayor batería residual, aunque tenga mayor costo, no se descarta
+automáticamente: puede habilitar una continuación que requiera más energía.
+
+En `OPEN` se aplica el mismo principio de dominancia entre candidatos aún no
+extraídos. Esto permite mantener las alternativas que son potencialmente
+útiles sin tratar cada nivel de batería como una combinación independiente
+sin criterio.
 
 ## Formulación y tamaño del espacio (obligatorio)
 
@@ -469,10 +509,10 @@ La acción de soltar objetos es el principal cuello de botella. El simulador per
 
 Se aplicaron tres estrategias:
 - **Agregación de objetos:** los materiales equivalentes (como fusibles o placas) no se distinguen individualmente con identificadores únicos; se modelan mediante contadores por tipo en el estado, eliminando millones de permutaciones físicamente idénticas.
-- **Restricción estricta de DROP:** el agente solo genera esta acción si hay saturación de carga, es decir, cuando el robot necesita liberar peso para poder recoger un objeto prioritario.
+- **Restricción estricta de DROP:** el agente solo genera esta acción cuando un objeto relevante de la zona actual no cabe con la carga existente y soltar uno de los objetos transportados haría posible recogerlo.
 - **Poda de objetos "muertos":** una vez que un sistema o puerta fue reparado o abierto de forma permanente, las llaves o herramientas específicas requeridas para esa única tarea pierden toda utilidad y se eliminan del estado de búsqueda.
 
-Estas podas no hacen perder la solución óptima porque, en el simulador, viajar con carga no penaliza el consumo de batería (el costo de moverse depende solo del corredor), y toda acción de manipulación tiene un costo oficial estrictamente positivo. Cualquier plan que decida soltar un objeto para luego volver a recogerlo sin una necesidad física de peso acumulará un costo mayor. El plan óptimo siempre preferirá llevar los objetos guardados de forma continua. Por lo tanto, restringir la acción de soltar objetos solo a los casos de saturación de carga garantiza que nunca se pierda un plan óptimo.
+Estas podas no hacen perder la solución óptima porque, en el simulador, viajar con carga no penaliza el consumo de batería (el costo de moverse depende solo del corredor), y toda acción de manipulación tiene un costo oficial estrictamente positivo. Cualquier plan que decida soltar un objeto para luego volver a recogerlo sin una necesidad física de peso acumulará un costo mayor. El plan óptimo siempre preferirá llevar los objetos guardados de forma continua. Por lo tanto, restringir la acción de soltar objetos a situaciones en las que existe una necesidad concreta de liberar capacidad para un objeto relevante evita las ramas de reubicación arbitraria sin eliminar la liberación de capacidad necesaria para continuar un plan óptimo.
 
 **¿Por qué no es solución subir la capacidad, bajar las estaciones o ignorar la batería?**
 

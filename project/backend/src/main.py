@@ -1,5 +1,4 @@
-"""FastAPI backend — demo solver for frontend integration testing."""
-
+"""FastAPI backend for the Emergency Control search agent."""
 from __future__ import annotations
 
 import json
@@ -9,9 +8,9 @@ from typing import Any
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from demo_plan import build_demo_plan
+from agent import build_plan
 
-app = FastAPI(title="Emergency Control API", version="1.0.0")
+app = FastAPI(title="Emergency Control API", version="2.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -41,10 +40,6 @@ def get_scenario() -> dict[str, Any]:
 
 @app.post("/api/solve")
 def solve(scenario: dict[str, Any]) -> dict[str, Any]:
-    """Return a demo plan consistent with the provided scenario.
-
-    Students replace this with a real UCS/search agent. The response contract
-    must remain: solution_found, total_cost, steps[{op, cost, ...}].
-    """
+    """Solve the supplied scenario with Uniform-Cost Graph Search."""
     data = scenario if scenario else _load_default_scenario()
-    return build_demo_plan(data)
+    return build_plan(data)
